@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { Send, Plus, Mic } from 'lucide-react';
 
 interface ChatInputProps {
@@ -13,7 +13,6 @@ export default function ChatInput({
   disabled = false,
 }: ChatInputProps) {
   const [message, setMessage] = useState('');
-  const [rows, setRows] = useState(1);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -33,7 +32,7 @@ export default function ChatInput({
 
   const handleSendMessage = () => {
     if (message.trim() && !disabled) {
-      onSendMessage?.(message);
+      onSendMessage?.(message.trim());
       setMessage('');
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';

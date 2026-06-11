@@ -1,5 +1,9 @@
-import { OpenAI } from 'openai';
+import { GoogleGenAI } from '@google/genai';
 import { NextRequest, NextResponse } from 'next/server';
+
+export const runtime = 'nodejs';
+
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
 const BANKING_SYSTEM_PROMPT = `You are BankingAI Coach, an expert banking exam preparation assistant specializing in Indian banking exams including IBPS PO, IBPS Clerk, SBI PO, SBI Clerk, RBI, and RRB exams.
 
@@ -13,24 +17,28 @@ Your expertise includes:
 
 Provide clear, concise, and helpful answers tailored to banking aspirants. Use examples and practical tips whenever possible. If asked about topics unrelated to banking, politely redirect the conversation back to banking exam preparation.`;
 
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-
-type ChatMessage = {
+type IncomingChatMessage = {
   role: 'user' | 'assistant' | 'system';
   content: string;
 };
 
-type OpenAIError = {
-  status?: number;
+type GeminiError = {
+  code?: number;
+  status?: string | number;
   message?: string;
 };
 
-const isChatMessage = (message: unknown): message is ChatMessage => {
+const jsonError = (error: string, status: number) =>
+  NextResponse.json({ error }, { status });
+
+const isIncomingChatMessage = (
+  message: unknown
+): message is IncomingChatMessage => {
   if (!message || typeof message !== 'object') {
     return false;
   }
 
-  const candidate = message as Partial<ChatMessage>;
+  const candidate = message as Partial<IncomingChatMessage>;
 
   return (
     (candidate.role === 'user' ||
@@ -40,110 +48,131 @@ const isChatMessage = (message: unknown): message is ChatMessage => {
   );
 };
 
-const getOpenAIError = (error: unknown): OpenAIError => {
+const getErrorDetails = (error: unknown): GeminiError => {
   if (!error || typeof error !== 'object') {
     return {};
   }
 
-  const candidate = error as OpenAIError;
+  const candidate = error as GeminiError;
 
   return {
+    code: candidate.code,
     status: candidate.status,
     message: candidate.message,
   };
 };
 
+const getMessagesFromBody = (body: unknown): IncomingChatMessage[] | null => {
+  if (!body || typeof body !== 'object') {
+    return null;
+  }
+
+  const payload = body as {
+    message?: unknown;
+    messages?: unknown;
+  };
+
+  if (typeof payload.message === 'string') {
+    return [{ role: 'user', content: payload.message }];
+  }
+
+  if (
+    Array.isArray(payload.messages) &&
+    payload.messages.every(isIncomingChatMessage)
+  ) {
+    return payload.messages;
+  }
+
+  return null;
+};
+
 export async function POST(request: NextRequest) {
+  let body: unknown;
+
   try {
-    const { messages } = await request.json();
+    body = await request.json();
+  } catch {
+    return jsonError('Invalid JSON request body', 400);
+  }
 
-    if (!messages || !Array.isArray(messages) || !messages.every(isChatMessage)) {
-      return NextResponse.json(
-        { error: 'Invalid messages format' },
-        { status: 400 }
-      );
-    }
+  const messages = getMessagesFromBody(body);
 
-    const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!messages) {
+    return jsonError('Request must include a message or messages array', 400);
+  }
 
-    if (!apiKey) {
-      console.error('OPENAI_API_KEY not found in environment variables');
-      return NextResponse.json(
-        { error: 'OpenAI API key not configured' },
-        { status: 500 }
-      );
-    }
+  const conversation = messages
+    .filter((message) => message.role !== 'system')
+    .map((message) => ({
+      role: message.role === 'assistant' ? 'model' : 'user',
+      content: message.content.trim(),
+    }))
+    .filter((message) => message.content.length > 0);
 
-    if (apiKey.includes('your-actual-key-here')) {
-      console.error('OPENAI_API_KEY still contains the setup placeholder');
-      return NextResponse.json(
-        { error: 'OpenAI API key is still set to the placeholder value' },
-        { status: 500 }
-      );
-    }
+  const lastMessage = conversation.at(-1);
 
-    // Initialize OpenAI client with current environment variable
-    const openai = new OpenAI({
-      apiKey,
+  if (!lastMessage || lastMessage.role !== 'user') {
+    return jsonError('Message cannot be empty', 400);
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+
+  if (!apiKey) {
+    console.error('GEMINI_API_KEY is not configured');
+    return jsonError('Gemini API key is not configured', 500);
+  }
+
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: conversation.map((message) => ({
+        role: message.role,
+        parts: [{ text: message.content }],
+      })),
+      config: {
+        systemInstruction: BANKING_SYSTEM_PROMPT,
+        temperature: 0.7,
+        maxOutputTokens: 1000,
+      },
     });
 
-    // Format messages for OpenAI API
-    const formattedMessages = messages.map((msg: ChatMessage) => ({
-      role: msg.role,
-      content: msg.content,
-    }));
+    const content = response.text?.trim();
 
-    const response = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content: BANKING_SYSTEM_PROMPT,
-        },
-        ...formattedMessages,
-      ],
-      temperature: 0.7,
-      max_tokens: 1000,
-      top_p: 1,
-      frequency_penalty: 0,
-      presence_penalty: 0,
-    });
-
-    const assistantMessage =
-      response.choices[0]?.message?.content || 'Unable to generate response';
+    if (!content) {
+      return jsonError('Gemini returned an empty response', 502);
+    }
 
     return NextResponse.json({
-      content: assistantMessage,
       role: 'assistant',
+      content,
     });
   } catch (error: unknown) {
-    console.error('OpenAI API Error:', error);
-    const openAIError = getOpenAIError(error);
+    console.error('Gemini API error:', error);
+    const geminiError = getErrorDetails(error);
+    const statusText = String(geminiError.status ?? '').toUpperCase();
+    const messageText = geminiError.message ?? '';
 
-    if (openAIError.status === 401) {
-      return NextResponse.json(
-        { error: 'Invalid OpenAI API key' },
-        { status: 401 }
+    if (
+      geminiError.code === 429 ||
+      statusText === 'RESOURCE_EXHAUSTED' ||
+      messageText.toLowerCase().includes('quota')
+    ) {
+      return jsonError(
+        'Gemini rate limit or quota exceeded. Please try again later.',
+        429
       );
     }
 
-    if (openAIError.status === 429) {
-      return NextResponse.json(
-        { error: 'OpenAI rate limit or quota exceeded. Please check your billing/credits or try again later.' },
-        { status: 429 }
-      );
+    if (geminiError.code === 401 || geminiError.code === 403) {
+      return jsonError('Gemini API authentication failed', 401);
     }
 
-    if (openAIError.status === 404) {
-      return NextResponse.json(
-        { error: `OpenAI model not available: ${OPENAI_MODEL}` },
-        { status: 500 }
-      );
+    if (geminiError.code === 400) {
+      return jsonError('Gemini rejected the chat request', 400);
     }
 
-    return NextResponse.json(
-      { error: openAIError.message || 'Failed to process chat request' },
-      { status: 500 }
-    );
+    return jsonError('Failed to generate Gemini response', 502);
   }
 }

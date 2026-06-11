@@ -11,6 +11,12 @@ interface Message {
   timestamp: string;
 }
 
+type ApiChatResponse = {
+  role?: 'assistant';
+  content?: string;
+  error?: string;
+};
+
 export default function ChatWindow() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -50,15 +56,29 @@ export default function ChatWindow() {
   ];
 
   const handleSendMessage = async (text: string) => {
+    const trimmedText = text.trim();
+
+    if (!trimmedText || isLoading) {
+      return;
+    }
+
     const userMessage: Message = {
       id: createMessageId(),
       role: 'user',
-      content: text,
+      content: trimmedText,
       timestamp: new Date().toLocaleTimeString([], {
         hour: '2-digit',
         minute: '2-digit',
       }),
     };
+
+    const requestMessages = [
+      ...messages.map(({ role, content }) => ({ role, content })),
+      {
+        role: 'user' as const,
+        content: trimmedText,
+      },
+    ];
 
     setMessages((prev) => [...prev, userMessage]);
     setIsLoading(true);
@@ -70,22 +90,19 @@ export default function ChatWindow() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          messages: [
-            ...messages,
-            {
-              role: 'user',
-              content: text,
-            },
-          ],
+          messages: requestMessages,
         }),
       });
 
+      const data = (await response.json().catch(() => ({}))) as ApiChatResponse;
+
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to get response');
+        throw new Error(data.error || 'Failed to get response');
       }
 
-      const data = await response.json();
+      if (!data.content) {
+        throw new Error('AI response was empty');
+      }
 
       const aiMessage: Message = {
         id: createMessageId(),
@@ -122,7 +139,9 @@ export default function ChatWindow() {
   };
 
   const handleSuggestedQuestion = (title: string) => {
-    handleSendMessage(title);
+    if (!isLoading) {
+      handleSendMessage(title);
+    }
   };
 
   return (
@@ -147,6 +166,7 @@ export default function ChatWindow() {
                   <button
                     key={index}
                     onClick={() => handleSuggestedQuestion(question.title)}
+                    disabled={isLoading}
                     className="p-4 text-left rounded-lg border border-gray-200 hover:border-gray-300 hover:bg-gray-50 transition-all group"
                   >
                     <div className="font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">
